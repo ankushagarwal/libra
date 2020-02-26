@@ -13,7 +13,7 @@ spec:
     effect: "NoSchedule"
   containers:
     - name: main
-      image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_cluster_test:kush_c2e46331
+      image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_cluster_test:kush_71d7c5e9
       imagePullPolicy: Always
       env:
       - name: RUST_BACKTRACE
