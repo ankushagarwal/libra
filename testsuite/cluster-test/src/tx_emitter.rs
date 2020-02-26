@@ -186,7 +186,6 @@ impl TxEmitter {
                 };
                 let join_handle = tokio_handle.spawn(worker.run().boxed());
                 workers.push(Worker { join_handle });
-                thread::sleep(Duration::from_millis(10)); // Small stagger between starting threads
             }
         }
         Ok(EmitJob {
@@ -292,7 +291,7 @@ impl TxEmitter {
         emit_job_request: EmitJobRequest,
     ) -> Result<TxStats> {
         let job = self.start_job(emit_job_request).await?;
-        thread::sleep(duration);
+        tokio::time::delay_for(duration).await;
         let stats = self.stop_job(job);
         Ok(stats)
     }
@@ -338,13 +337,12 @@ impl SubmissionWorker {
                 let now = Instant::now();
                 if wait_util > now {
                     time::delay_for(wait_util - now).await;
-                } else {
-                    debug!("[{}] Thread won't sleep", self.instance);
                 }
             }
             if self.params.wait_committed {
                 if let Err(uncommitted) =
-                    wait_for_accounts_sequence(&mut self.client, &mut self.accounts).await
+                    wait_for_accounts_sequence(&mut self.client, &mut self.accounts, &self.instance)
+                        .await
                 {
                     self.stats
                         .committed
@@ -389,12 +387,16 @@ impl SubmissionWorker {
 async fn wait_for_accounts_sequence(
     client: &mut AdmissionControlClientAsync,
     accounts: &mut [AccountData],
+    instance: &Instance,
 ) -> Result<(), Vec<(AccountAddress, u64)>> {
     let deadline = Instant::now() + TXN_MAX_WAIT;
     let addresses: Vec<_> = accounts.iter().map(|d| d.address).collect();
     loop {
         match query_sequence_numbers(client, &addresses).await {
-            Err(e) => info!("Failed to query ledger info: {:?}", e),
+            Err(e) => info!(
+                "Failed to query ledger info for instance {} : {:?}",
+                instance, e
+            ),
             Ok(sequence_numbers) => {
                 if is_sequence_equal(accounts, &sequence_numbers) {
                     break;
@@ -560,6 +562,7 @@ async fn execute_and_wait_transactions(
         account.sequence_number,
         account.address
     );
+    let instance = client.0.clone();
     for request in txn {
         retry::retry_async(retry::fixed_retry_strategy(5_000, 20), || {
             let request = request.clone();
@@ -585,7 +588,7 @@ async fn execute_and_wait_transactions(
         })
         .await?;
     }
-    let r = wait_for_accounts_sequence(client, slice::from_mut(account))
+    let r = wait_for_accounts_sequence(client, slice::from_mut(account), &instance)
         .await
         .map_err(|_| format_err!("Mint transactions were not committed before expiration"));
     debug!(

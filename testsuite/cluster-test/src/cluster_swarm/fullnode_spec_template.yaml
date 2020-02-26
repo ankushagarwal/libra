@@ -60,9 +60,9 @@ spec:
     - name: CFG_FULLNODE_INDEX
       value: "{fullnode_index}"
     - name: CFG_SEED
-      value: "1337133713371337133713371337133713371337133713371337133713371337"
+      value: "{cfg_seed}"
     - name: CFG_FULLNODE_SEED
-      value: "2674267426742674267426742674267426742674267426742674267426742674"
+      value: "{cfg_fullnode_seed}"
     - name: RUST_LOG
       value: "debug"
     - name: RUST_BACKTRACE
