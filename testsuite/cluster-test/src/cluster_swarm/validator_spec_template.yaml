@@ -15,7 +15,7 @@ spec:
   nodeName: "{node_name}"
   initContainers:
   - name: init
-    image: bitnami/kubectl:1.17
+    image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_init:{image_tag}
     volumeMounts:
     - mountPath: /opt/libra/data
       name: data
