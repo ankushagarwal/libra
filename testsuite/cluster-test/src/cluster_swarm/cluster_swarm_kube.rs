@@ -65,6 +65,11 @@ impl ClusterSwarmKube {
         } else {
             ""
         };
+        use std::env;
+        let cfg_overrides = match env::var("VALIDATOR_CFG_OVERRIDES") {
+            Ok(s) => s,
+            Err(_) => "".to_string(),
+        };
         let pod_yaml = format!(
             include_str!("validator_spec_template.yaml"),
             index = index,
@@ -72,7 +77,7 @@ impl ClusterSwarmKube {
             num_fullnodes = num_fullnodes,
             image_tag = image_tag,
             node_name = node_name,
-            cfg_overrides = "",
+            cfg_overrides = &cfg_overrides,
             delete_data = delete_data,
             cfg_seed = CFG_SEED,
             cfg_fullnode_seed = cfg_fullnode_seed,

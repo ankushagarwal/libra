@@ -13,19 +13,21 @@ spec:
     effect: "NoSchedule"
   containers:
     - name: main
-      image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_cluster_test:kush_d1b1ef2c
+      image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_cluster_test:kush_bf3d015e
       imagePullPolicy: Always
       env:
       - name: RUST_BACKTRACE
         value: "1"
       - name: RUST_LOG
         value: "debug"
+      - name: VALIDATOR_CFG_OVERRIDES
+        value: "max_block_size=2000,capacity_per_user=20000"
       command:
       - cluster-test
       - --run=bench
       - --k8s-fullnodes-per-validator=0
       - --k8s-num-validators=100
-#      - --workers-per-ac=200
-#      - --accounts-per-client=1
-#      - --wait-millis=65
-#      - --burst=1
+      - --workers-per-ac=1
+      - --accounts-per-client=1
+      - --wait-millis=62
+      - --burst=1
