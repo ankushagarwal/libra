@@ -19,6 +19,7 @@ use anyhow::{bail, format_err, Result};
 use cluster_test::{
     aws::Aws,
     cluster::Cluster,
+    cluster_swarm::{cluster_swarm_kube::ClusterSwarmKube, ClusterSwarm},
     deployment::DeploymentManager,
     effects::{Action, Effect, Reboot, RemoveNetworkEffects, StopContainer},
     experiments::{get_experiment, Context, Experiment},
@@ -122,6 +123,11 @@ struct Args {
         help = "Whether transactions should be submitted to validators or full nodes"
     )]
     pub emit_to_validator: Option<bool>,
+
+    #[structopt(long, default_value = "1")]
+    pub k8s_fullnodes_per_validator: u32,
+    #[structopt(long, parse(try_from_str), default_value = "30")]
+    pub k8s_num_validators: u32,
 }
 
 pub fn main() {
@@ -274,6 +280,8 @@ struct ClusterUtil {
     cluster: Cluster,
     aws: Aws,
     prometheus: Prometheus,
+    cluster_swarm: ClusterSwarmKube,
+    k8s: bool,
 }
 
 struct ClusterTestRunner {
@@ -291,6 +299,8 @@ struct ClusterTestRunner {
     report: SuiteReport,
     global_emit_job_request: EmitJobRequest,
     emit_to_validator: bool,
+    cluster_swarm: ClusterSwarmKube,
+    k8s: bool,
 }
 
 fn parse_host_port(s: &str) -> Result<(String, u32)> {
@@ -342,30 +352,79 @@ impl BasicSwarmUtil {
 
 impl ClusterUtil {
     pub fn setup(args: &Args) -> Self {
-        let aws = Aws::new();
-        let cluster = Cluster::discover(&aws).expect("Failed to discover cluster");
-        let cluster = if args.peers.is_empty() {
-            cluster
-        } else {
-            cluster.validator_sub_cluster(args.peers.clone())
-        };
-        let prometheus = Prometheus::new(
-            cluster
-                .prometheus_ip()
-                .expect("Failed to discover prometheus ip in aws"),
-            aws.workspace(),
-        );
-        info!(
-            "Discovered {} validators and {} fns in {} workspace",
-            cluster.validator_instances().len(),
-            cluster.fullnode_instances().len(),
-            aws.workspace()
-        );
-        Self {
-            cluster,
-            aws,
-            prometheus,
-        }
+        Runtime::new().unwrap().block_on(async move {
+            let k8s = env::var("KUBERNETES_SERVICE_HOST").is_ok();
+            let aws = Aws::new(k8s);
+            let cluster_swarm = ClusterSwarmKube::new()
+                .await
+                .expect("Failed to initialize ClusterSwarmKube");
+            let cluster = if k8s {
+                cluster_swarm.delete_all().await.expect("delete_all failed");
+                let image_tag = if let Some(image) = args.deploy.as_ref() {
+                    image.clone()
+                } else {
+                    "master".to_string()
+                };
+                info!(
+                    "Deploying with {} tag for validators and fullnodes",
+                    image_tag
+                );
+                cluster_swarm
+                    .create_validator_and_fullnode_set(
+                        args.k8s_num_validators,
+                        args.k8s_fullnodes_per_validator,
+                        &image_tag,
+                        true,
+                    )
+                    .await
+                    .expect("Failed to create_validator_and_fullnode_set");
+                info!("Deployment complete");
+                Cluster::new_k8s(
+                    cluster_swarm.validator_instances().await,
+                    cluster_swarm.fullnode_instances().await,
+                )
+                .unwrap()
+            } else {
+                Cluster::discover(&aws).expect("Failed to discover cluster")
+            };
+            let cluster = if args.peers.is_empty() {
+                cluster
+            } else {
+                cluster.validator_sub_cluster(args.peers.clone())
+            };
+            let prometheus_ip = if k8s {
+                "libra-testnet-prometheus-server.default.svc.cluster.local"
+            } else {
+                cluster
+                    .prometheus_ip()
+                    .expect("Failed to discover prometheus ip in aws")
+            };
+            let grafana_base_url = if k8s {
+                cluster_swarm
+                    .get_grafana_baseurl()
+                    .await
+                    .expect("Failed to discover grafana url in k8s")
+            } else {
+                format!(
+                    "http://prometheus.{}.aws.hlw3truzy4ls.com:9091",
+                    aws.workspace()
+                )
+            };
+            let prometheus = Prometheus::new(prometheus_ip, grafana_base_url, k8s);
+            info!(
+                "Discovered {} validators and {} fns in {} workspace",
+                cluster.validator_instances().len(),
+                cluster.fullnode_instances().len(),
+                aws.workspace()
+            );
+            Self {
+                cluster,
+                aws,
+                prometheus,
+                cluster_swarm,
+                k8s,
+            }
+        })
     }
 
     pub fn discovery(&self) {
@@ -432,6 +491,8 @@ impl ClusterTestRunner {
         let util = ClusterUtil::setup(args);
         let cluster = util.cluster;
         let aws = util.aws;
+        let cluster_swarm = util.cluster_swarm;
+        let k8s = util.k8s;
         let log_tail_started = Instant::now();
         let logs = DebugPortLogThread::spawn_new(&cluster);
         let log_tail_startup_time = Instant::now() - log_tail_started;
@@ -445,19 +506,13 @@ impl ClusterTestRunner {
             Err(..) => 15,
         };
         let experiment_interval = Duration::from_secs(experiment_interval_sec);
-        let workspace = aws.workspace().clone();
         let deployment_manager = DeploymentManager::new(aws, cluster.clone());
         let slack = SlackClient::new();
         let slack_changelog_url = env::var("SLACK_CHANGELOG_URL")
             .map(|u| u.parse().expect("Failed to parse SLACK_CHANGELOG_URL"))
             .ok();
         let tx_emitter = TxEmitter::new(&cluster);
-        let prometheus = Prometheus::new(
-            cluster
-                .prometheus_ip()
-                .expect("Failed to discover prometheus ip in aws"),
-            &workspace,
-        );
+        let prometheus = util.prometheus;
         let github = GitHub::new();
         let report = SuiteReport::new();
         let runtime = Builder::new()
@@ -497,6 +552,8 @@ impl ClusterTestRunner {
             report,
             global_emit_job_request,
             emit_to_validator,
+            cluster_swarm,
+            k8s,
         }
     }
 
@@ -566,7 +623,6 @@ impl ClusterTestRunner {
         self.health_check_runner.clear();
         self.tx_emitter.clear();
         self.start();
-        info!("Waiting until all validators healthy after deployment");
         self.wait_until_all_healthy()?;
         Ok(())
     }
@@ -607,6 +663,7 @@ impl ClusterTestRunner {
     pub fn cleanup_and_run(&mut self, experiment: Box<dyn Experiment>) -> Result<()> {
         self.cleanup();
         self.run_single_experiment(experiment, Some(self.global_emit_job_request.clone()))?;
+        self.runtime.block_on(self.cluster_swarm.delete_all())?;
         self.print_report();
         Ok(())
     }
@@ -616,6 +673,7 @@ impl ClusterTestRunner {
         mut experiment: Box<dyn Experiment>,
         mut global_emit_job_request: Option<EmitJobRequest>,
     ) -> Result<()> {
+        self.wait_until_all_healthy()?;
         let events = self.logs.recv_all();
         if let Err(s) =
             self.health_check_runner
@@ -786,6 +844,7 @@ impl ClusterTestRunner {
     }
 
     fn wait_until_all_healthy(&mut self) -> Result<()> {
+        info!("Waiting for all validators to be healthy");
         let wait_deadline = Instant::now() + Duration::from_secs(20 * 60);
         for instance in self.cluster.validator_instances() {
             self.health_check_runner.invalidate(instance.peer_name());
@@ -806,6 +865,7 @@ impl ClusterTestRunner {
                 }
             }
         }
+        info!("All validators are now healthy");
         Ok(())
     }
 
@@ -887,18 +947,20 @@ impl ClusterTestRunner {
     }
 
     fn cleanup(&mut self) {
-        let futures = self.cluster.all_instances().map(|instance| async move {
-            RemoveNetworkEffects::new(instance.clone())
-                .apply()
-                .await
-                .map_err(|e| {
-                    info!(
-                        "Failed to remove network effects for {}. Error: {}",
-                        instance, e
-                    );
-                })
-        });
-        self.runtime.block_on(join_all(futures));
+        if !self.k8s {
+            let futures = self.cluster.all_instances().map(|instance| async move {
+                RemoveNetworkEffects::new(instance.clone())
+                    .apply()
+                    .await
+                    .map_err(|e| {
+                        info!(
+                            "Failed to remove network effects for {}. Error: {}",
+                            instance, e
+                        );
+                    })
+            });
+            self.runtime.block_on(join_all(futures));
+        }
     }
 
     pub fn stop(&mut self) {
