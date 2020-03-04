@@ -16,7 +16,7 @@ spec:
   nodeName: "{node_name}"
   initContainers:
   - name: init
-    image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_init:{image_tag}
+    image: 853397791086.dkr.ecr.us-west-2.amazonaws.com/libra_init:master
     volumeMounts:
     - mountPath: /opt/libra/data
       name: data
