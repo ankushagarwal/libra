@@ -213,6 +213,7 @@ else
       cluster_test_pod_template.yaml > ${specfile}
   kube_select_cluster
   context=${K8S_CONTEXT_PATTERN/index/${retval_kube_select_cluster}}
+  context="arn:aws:eks:us-west-2:853397791086:cluster/kush-k8s-testnet"
   kubectl --context=${context} apply -f ${specfile}
   if [ $? -gt 0 ]; then
     echo "Failed to create cluster-test pod"
