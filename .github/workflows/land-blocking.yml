@@ -18,7 +18,7 @@ jobs:
           echo "::set-env name=TEST_TAG::land_$(git rev-parse --short=8 HEAD)"
       - name: Check kill switch
         id: check_ks
-        run:
+        run: |
           if ${{ secrets.KILL_SWITCH_LAND_BLOCKING_TEST }} ; then
             echo "::set-output name=should_run::false";
           else
@@ -32,7 +32,13 @@ jobs:
       - name: Build, tag and push images
         if: steps.check_ks.outputs.should_run == 'true'
         run: |
-          docker/build-aws.sh --build-all --version $LIBRA_GIT_REV --addl_tags canary,${TEST_TAG}
+          VALIDATOR_IMAGE=$(aws --region=us-west-2 ecr batch-get-image --repository-name libra_validator --image-ids=imageTag=${TEST_TAG} | jq '.images | length')
+          CLUSTERTEST_IMAGE=$(aws --region=us-west-2 ecr batch-get-image --repository-name libra_cluster_test --image-ids=imageTag=${TEST_TAG} | jq '.images | length')
+          if [[ ${VALIDATOR_IMAGE} -eq 1 ]] && [[ ${CLUSTERTEST_IMAGE} -eq 1 ]]; then
+            echo "Images with tag ${TEST_TAG} already exist. Skipping rebuild."
+          else
+            docker/build-aws.sh --build-all --version $LIBRA_GIT_REV --addl_tags canary,${TEST_TAG}
+          fi
       - name: Launch cluster test
         if: steps.check_ks.outputs.should_run == 'true'
         # NOTE Remember to update PR comment payload if cti cmd is updated.
