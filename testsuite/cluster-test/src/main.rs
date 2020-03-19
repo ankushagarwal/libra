@@ -370,6 +370,13 @@ impl ClusterUtil {
                     "Deploying with {} tag for validators and fullnodes",
                     image_tag
                 );
+                cluster_test::aws::autoscale(
+                    (args.k8s_num_validators
+                        + (args.k8s_fullnodes_per_validator * args.k8s_num_validators))
+                        as i64,
+                    "kush-k8s-testnet-validators",
+                )
+                .expect("kush-k8s-testnet-validators scaling failed");
                 cluster_swarm
                     .create_validator_and_fullnode_set(
                         args.k8s_num_validators,

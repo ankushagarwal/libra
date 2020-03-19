@@ -4,14 +4,19 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{bail, format_err, Result};
-use libra_logger::error;
+use libra_logger::*;
 use reqwest::{self, Url};
+use rusoto_autoscaling::{
+    AutoScalingGroupNamesType, Autoscaling, AutoscalingClient, SetDesiredCapacityType,
+};
 use rusoto_core::Region;
 use rusoto_ec2::{DescribeInstancesRequest, Ec2, Ec2Client};
 use rusoto_ecr::EcrClient;
 use rusoto_ecs::EcsClient;
 use rusoto_s3::{PutObjectRequest, S3Client, S3};
+use rusoto_sts::WebIdentityProvider;
 use std::{fs::File, io::Read, thread, time::Duration};
+use util::retry;
 
 #[derive(Clone)]
 pub struct Aws {
@@ -123,6 +128,52 @@ fn current_instance_id() -> String {
     let response = client.get(url).send();
     let response = response.expect("Metadata request failed");
     response.text().expect("Failed to parse metadata response")
+}
+
+pub fn autoscale(desired_capacity: i64, asg_name: &str) -> Result<()> {
+    let set_desired_capacity_type = SetDesiredCapacityType {
+        auto_scaling_group_name: asg_name.to_string(),
+        desired_capacity,
+        honor_cooldown: Some(false),
+    };
+    let credentials_provider = WebIdentityProvider::from_k8s_env();
+    let dispatcher = rusoto_core::HttpClient::new().expect("failed to create request dispatcher");
+    let asc = AutoscalingClient::new_with(dispatcher, credentials_provider, Region::UsWest2);
+    asc.set_desired_capacity(set_desired_capacity_type)
+        .sync()
+        .map_err(|e| format_err!("set_desired_capacity failed: {:?}", e))?;
+    retry::retry(retry::fixed_retry_strategy(10_000, 30), || {
+        let auto_scaling_group_names_type = AutoScalingGroupNamesType {
+            auto_scaling_group_names: Some(vec![asg_name.to_string()]),
+            max_records: Some(desired_capacity),
+            next_token: None,
+        };
+        let asgs = asc
+            .describe_auto_scaling_groups(auto_scaling_group_names_type)
+            .sync()?;
+        if asgs.auto_scaling_groups.len() < 1 {
+            bail!("");
+        }
+        let asg = &asgs.auto_scaling_groups[0];
+        let count = asg
+            .instances
+            .clone()
+            .ok_or_else(|| format_err!("instances not found for auto_scaling_group"))?
+            .iter()
+            .filter(|instance| instance.lifecycle_state == "InService")
+            .count() as i64;
+        if count < desired_capacity {
+            info!(
+                "Waiting for scale-up to complete. Current size: {}, Desired Size: {}",
+                count, desired_capacity
+            );
+            info!(
+                "Waiting for scale-up to complete. Current size: {}, Desired Size: {}",
+                count, desired_capacity
+            );
+        }
+        Ok(())
+    })
 }
 
 pub fn upload_to_s3(
