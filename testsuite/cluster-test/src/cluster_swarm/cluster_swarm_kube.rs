@@ -7,7 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{bail, format_err, Result};
 use async_trait::async_trait;
-
+use either::Either;
 use futures::{future::try_join_all, lock::Mutex};
 use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Service};
 use kube::{
@@ -516,50 +516,64 @@ impl ClusterSwarm for ClusterSwarmKube {
     }
 
     async fn delete_all(&self) -> Result<()> {
-        let pod_api: Api<Pod> = Api::namespaced(self.client.clone(), DEFAULT_NAMESPACE);
-        let pod_names: Vec<String> = pod_api
-            .list(&ListParams {
-                label_selector: Some("libra-node=true".to_string()),
-                ..Default::default()
+        debug!("Deleting all pods with label libra-node=true");
+        retry::retry_async(retry::fixed_retry_strategy(10000, 30), move || {
+            Box::pin(async move {
+                let pod_api: Api<Pod> = Api::namespaced(self.client.clone(), DEFAULT_NAMESPACE);
+                match pod_api
+                  .delete_collection(&ListParams {
+                      label_selector: Some("libra-node=true".to_string()),
+                      ..Default::default()
+                  })
+                  .await? {
+                    Either::Left(object_list) => if object_list.items.is_empty() { return Ok(()) },
+                    Either::Right(status) => if status.code == 200 { return Ok(()); },
+                }
+                bail!("Pod deletion still in progress..");
             })
-            .await?
-            .iter()
-            .map(|pod| -> Result<String, anyhow::Error> {
-                Ok(pod
-                    .metadata
-                    .as_ref()
-                    .ok_or_else(|| format_err!("metadata not found for pod"))?
-                    .name
-                    .as_ref()
-                    .ok_or_else(|| format_err!("name not found for pod"))?
-                    .clone())
+        })
+        .await
+        .map_err(|e| format_err!("Failed to delete pods : {:?}", e))?;
+
+        debug!("Deleting all services with label libra-node=true");
+        retry::retry_async(retry::fixed_retry_strategy(10000, 30), move || {
+            Box::pin(async move {
+                let service_api: Api<Service> =
+                    Api::namespaced(self.client.clone(), DEFAULT_NAMESPACE);
+                let result = service_api
+                  .delete_collection(&ListParams {
+                      label_selector: Some("libra-node=true".to_string()),
+                      ..Default::default()
+                  }).await;
+                debug!("result: {:?}", result);
+                match result? {
+                    Either::Left(object_list) => if object_list.items.is_empty() { return Ok(()) },
+                    Either::Right(status) => if status.code == 200 { return Ok(()); },
+                }
+                bail!("Service deletion still in progress..");
             })
-            .collect::<Result<_, _>>()?;
-        let delete_futures = pod_names.iter().map(|pod_name| self.delete_pod(pod_name));
-        try_join_all(delete_futures).await?;
-        let service_api: Api<Service> = Api::namespaced(self.client.clone(), DEFAULT_NAMESPACE);
-        let service_names: Vec<String> = service_api
-            .list(&ListParams {
-                label_selector: Some("libra-node=true".to_string()),
-                ..Default::default()
+        })
+        .await
+        .map_err(|e| format_err!("Failed to delete services : {:?}", e))?;
+
+        debug!("Deleting all jobs with label app=remove-network-effects");
+        retry::retry_async(retry::fixed_retry_strategy(10000, 30), move || {
+            Box::pin(async move {
+                let job_api: Api<Job> = Api::namespaced(self.client.clone(), DEFAULT_NAMESPACE);
+                match job_api
+                  .delete_collection(&ListParams {
+                      label_selector: Some("app=remove-network-effects".to_string()),
+                      ..Default::default()
+                  })
+                  .await? {
+                    Either::Left(object_list) => if object_list.items.is_empty() { return Ok(()) },
+                    Either::Right(status) => if status.code == 200 { return Ok(()); },
+                }
+                bail!("Job deletion still in progress..");
             })
-            .await?
-            .iter()
-            .map(|service| -> Result<String, anyhow::Error> {
-                Ok(service
-                    .metadata
-                    .as_ref()
-                    .ok_or_else(|| format_err!("metadata not found for service"))?
-                    .name
-                    .as_ref()
-                    .ok_or_else(|| format_err!("name not found for service"))?
-                    .clone())
-            })
-            .collect::<Result<_, _>>()?;
-        let delete_futures = service_names
-            .iter()
-            .map(|service_name| self.delete_service(service_name));
-        try_join_all(delete_futures).await?;
+        })
+        .await
+        .map_err(|e| format_err!("Failed to delete jobs : {:?}", e))?;
         Ok(())
     }
 
