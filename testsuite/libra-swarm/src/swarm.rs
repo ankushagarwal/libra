@@ -296,6 +296,7 @@ impl LibraSwarm {
     }
 
     pub fn configure_validator_swarm(
+        single_node_port: Option<u16>,
         num_nodes: usize,
         config_dir: Option<String>,
         template: Option<NodeConfig>,

@@ -31,17 +31,24 @@ struct Args {
     /// swarm.
     #[structopt(short = "f", long, default_value = "0")]
     pub num_full_nodes: usize,
+    /// Swarm runs on this port when run as a single node
+    #[structopt(long)]
+    pub single_node_port: Option<u16>,
 }
 
 fn main() {
     let args = Args::from_args();
     let num_nodes = args.num_nodes;
     let num_full_nodes = args.num_full_nodes;
+    if args.single_node_port.is_some() {
+        assert!(num_full_nodes == 0, "--single-node-port can only be set when --num-full-nodes is 0");
+        assert!(num_nodes == 1, "--single-node-port can only be set when --num-nodes is 1");
+    }
 
     libra_logger::Logger::new().init();
 
     let mut validator_swarm =
-        LibraSwarm::configure_validator_swarm(num_nodes, args.config_dir.clone(), None)
+        LibraSwarm::configure_validator_swarm(args.single_node_port, num_nodes, args.config_dir.clone(), None)
             .expect("Failed to configure validator swarm");
 
     let mut full_node_swarm = if num_full_nodes > 0 {
